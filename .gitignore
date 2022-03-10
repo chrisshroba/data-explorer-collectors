@@ -1,0 +1,13 @@
+node_modules
+dist
+dist-ssr
+
+.DS_Store
+*.local
+.python-version
+
+__pycache__
+.mypy_cache
+
+secrets.env
+.env
