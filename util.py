@@ -1,13 +1,9 @@
 import psycopg2
 import psycopg2.extras
-from dotenv import load_dotenv
 import os
-
-load_dotenv()
 
 
 def create_db_conn():
-
     conn = psycopg2.connect(
         host=os.getenv("PGHOST", None),
         port=os.getenv("PGPORT", None),
@@ -15,14 +11,11 @@ def create_db_conn():
         password=os.getenv("PGPASSWORD", None),
         database=os.getenv("PGDATABASE", None),
     )
-
     return conn
 
 
-def get_db_conn():
-    conn = create_db_conn()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.NamedTupleCursor)
-    return cur
+def get_cursor_for_conn(conn):
+    return conn.cursor(cursor_factory=psycopg2.extras.NamedTupleCursor)
 
 
 def query(cur, q, *args):

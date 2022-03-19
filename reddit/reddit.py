@@ -9,15 +9,13 @@ import praw
 import praw.models
 import psycopg2.extras
 
-with util.create_db_conn() as conn, conn.cursor(
-    cursor_factory=psycopg2.extras.NamedTupleCursor
-) as cur:
+dotenv.load_dotenv()
+
+with util.create_db_conn() as conn, util.get_cursor_for_conn(conn) as cur:
     seen_saved_posts, _ = util.query(cur, "SELECT * FROM reddit_saved_post")
 seen_saved_post_ids = {p.submission_id for p in seen_saved_posts}
 
 print(f"Found {len(seen_saved_post_ids)} saved posts already in db")
-
-dotenv.load_dotenv()
 
 REDDIT_CLIENT_ID = os.environ["REDDIT_CLIENT_ID"]
 REDDIT_CLIENT_SECRET = os.environ["REDDIT_CLIENT_SECRET"]
@@ -86,9 +84,7 @@ rows_to_add = [
 ]
 print(f"Inserting {len(rows_to_add)} rows.")
 
-with util.create_db_conn() as conn, conn.cursor(
-    cursor_factory=psycopg2.extras.NamedTupleCursor
-) as cur:
+with util.create_db_conn() as conn, util.get_cursor_for_conn(conn) as cur:
     util.insert(
         cur,
         "INSERT INTO reddit_submission (id, created_utc, title, url, post_json) VALUES %s ON CONFLICT DO NOTHING",
