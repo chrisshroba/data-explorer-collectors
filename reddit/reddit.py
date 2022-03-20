@@ -1,21 +1,11 @@
+import arrow
 import base64
 import json
 import os
-import util
-
-import arrow
-import dotenv
 import praw
 import praw.models
 import psycopg2.extras
-
-dotenv.load_dotenv()
-
-with util.create_db_conn() as conn, util.get_cursor_for_conn(conn) as cur:
-    seen_saved_posts, _ = util.query(cur, "SELECT * FROM reddit_saved_post")
-seen_saved_post_ids = {p.submission_id for p in seen_saved_posts}
-
-print(f"Found {len(seen_saved_post_ids)} saved posts already in db")
+import util
 
 REDDIT_CLIENT_ID = os.environ["REDDIT_CLIENT_ID"]
 REDDIT_CLIENT_SECRET = os.environ["REDDIT_CLIENT_SECRET"]
@@ -26,75 +16,118 @@ REDDIT_PASSWORD = base64.b64decode(
     REDDIT_PASSWORD_BASE64.encode("utf-8")
 ).decode("utf-8")
 
-reddit = praw.Reddit(
-    client_id=REDDIT_CLIENT_ID,
-    client_secret=REDDIT_CLIENT_SECRET,
-    user_agent=REDDIT_USER_AGENT,
-    username=REDDIT_USERNAME,
-    password=REDDIT_PASSWORD,
-)
 
-me = reddit.user.me()
+class RedditCollector(util.Collector):
+    def get_version(self):
+        return "0.1"
 
+    def get_collector_name(self):
+        return "reddit_collector"
 
-def rate_limit_str():
-    l = reddit.auth.limits
-    remaining = int(l["remaining"])
-    used = int(l["used"])
-    reset = arrow.get(l["reset_timestamp"]).to("local")
-    now = arrow.now()
-    until_seconds = (reset - now).total_seconds() if reset > now else 0
-    until_minutes = int(until_seconds // 60)
-    until_seconds_rem = int(until_seconds % 60)
-    until_str = f"{until_minutes}m{until_seconds_rem}s"
-    s = f"<RateLimit remaining={remaining} used={used} reset_in={until_str}>"
-    return s
+    def get_rate_limit_str(self, reddit):
+        limits = reddit.auth.limits
+        remaining = int(limits["remaining"])
+        used = int(limits["used"])
+        reset = arrow.get(limits["reset_timestamp"]).to("local")
+        now = arrow.now()
+        until_seconds = (reset - now).total_seconds() if reset > now else 0
+        until_minutes = int(until_seconds // 60)
+        until_seconds_rem = int(until_seconds % 60)
+        until_str = f"{until_minutes}m{until_seconds_rem}s"
+        s = (
+            f"<RateLimit remaining={remaining} used={used} reset_in="
+            + f"{until_str}>"
+        )
+        return s
 
+    def get_multirow_insertions(self):
 
-print(f"Current Rate Limit: {rate_limit_str()}")
+        # Get already seen reddit posts
+        with util.create_db_conn() as conn, util.get_cursor_for_conn(
+            conn
+        ) as cur:
+            seen_saved_posts_query_results = util.query(
+                cur, "SELECT * FROM reddit_saved_post"
+            )
+            seen_saved_posts = seen_saved_posts_query_results.rows
+        seen_saved_post_ids = {p.submission_id for p in seen_saved_posts}
 
-print(f"Logged in as {me.name}.")
+        reddit = praw.Reddit(
+            client_id=REDDIT_CLIENT_ID,
+            client_secret=REDDIT_CLIENT_SECRET,
+            user_agent=REDDIT_USER_AGENT,
+            username=REDDIT_USERNAME,
+            password=REDDIT_PASSWORD,
+        )
 
-print("Fetching Saved Posts Now.")
+        me = reddit.user.me()
 
-saved_posts = []
-saved_comments = []
-for idx, item in enumerate(me.saved(limit=None)):
-    if isinstance(item, praw.models.Submission):
-        saved_posts.append(item)
-    else:
-        saved_comments.append(item)
-    if idx % 100 == 99:
-        print(f"Processed {idx+1} saved items so far.")
+        self.log(f"Current Rate Limit: {self.get_rate_limit_str(reddit)}")
+        self.log(f"Logged in as {me.name}.")
+        self.log("Fetching Saved Posts Now.")
 
+        saved_posts = []
+        saved_comments = []
+        for idx, item in enumerate(me.saved(limit=100)):
+            if isinstance(item, praw.models.Submission):
+                saved_posts.append(item)
+            else:
+                saved_comments.append(item)
+            if idx % 100 == 99:
+                self.log(f"Processed {idx+1} saved items so far.")
 
-unseen_saved_posts = [p for p in saved_posts if p.id not in seen_saved_post_ids]
-print(
-    f"Found {len(saved_posts)} saved posts, {len(unseen_saved_posts)} of which are new."
-)
+        unseen_saved_posts = [
+            p for p in saved_posts if p.id not in seen_saved_post_ids
+        ]
+        self.log(
+            f"Found {len(saved_posts)} saved posts, {len(unseen_saved_posts)}"
+            + " of which are new."
+        )
 
+        def serialize_post(p):
+            return json.dumps(
+                p.__dict__, default=lambda o: "<Not Serializable>"
+            )
 
-def serialize_post(p):
-    return json.dumps(p.__dict__, default=lambda o: "<Not Serializable>")
+        submission_rows_to_add = [
+            (
+                p.id,
+                arrow.get(p.created_utc).datetime,
+                p.title,
+                p.url,
+                serialize_post(p),
+            )
+            for p in unseen_saved_posts
+        ]
+        saved_post_rows_to_add = [(p.id,) for p in unseen_saved_posts]
 
+        submission_insertions = util.MultiRowInsertion(
+            self.INSERT_SUBMISSIONS_SQL,
+            submission_rows_to_add,
+            "reddit_submission",
+        )
+        saved_post_insertions = util.MultiRowInsertion(
+            self.INSERT_SAVED_POSTS_SQL,
+            saved_post_rows_to_add,
+            "reddit_saved_post",
+        )
 
-rows_to_add = [
-    (p.id, arrow.get(p.created_utc).datetime, p.title, p.url, serialize_post(p))
-    for p in unseen_saved_posts
-]
-print(f"Inserting {len(rows_to_add)} rows.")
+        insertions = [submission_insertions, saved_post_insertions]
 
-with util.create_db_conn() as conn, util.get_cursor_for_conn(conn) as cur:
-    util.insert(
-        cur,
-        "INSERT INTO reddit_submission (id, created_utc, title, url, post_json) VALUES %s ON CONFLICT DO NOTHING",
-        rows_to_add,
+        self.log(f"Current Rate Limit: {self.get_rate_limit_str(reddit)}")
+        return insertions
+
+    INSERT_SUBMISSIONS_SQL = (
+        "INSERT INTO reddit_submission (id, created_utc, title, url, "
+        + "post_json) VALUES %s ON CONFLICT DO NOTHING"
     )
-    util.insert(
-        cur,
-        "INSERT INTO reddit_saved_post (submission_id) VALUES %s ON CONFLICT DO NOTHING",
-        [(p.id,) for p in unseen_saved_posts],
+
+    INSERT_SAVED_POSTS_SQL = (
+        "INSERT INTO reddit_saved_post (submission_id) VALUES %s ON CONFLICT"
+        + " DO NOTHING"
     )
 
-print("Done inserting.")
-print(f"Current Rate Limit: {rate_limit_str()}")
+
+if __name__ == "__main__":
+    collector = RedditCollector()
+    collector.run()
