@@ -73,6 +73,17 @@ class RedditCollector(util.Collector):
                 saved_posts.append(item)
             else:
                 saved_comments.append(item)
+
+            # If we've already seen the last 10 posts, then quit early.
+            if len(saved_posts) >= 10 and set(
+                [p.id for p in saved_posts][-10:]
+            ).issubset(set(seen_saved_post_ids)):
+                self.log(
+                    f"Seen {idx+1} items, and the last 10 posts have "
+                    + "already been seen, so not continuing further."
+                )
+                break
+
             if idx % 100 == 99:
                 self.log(f"Processed {idx+1} saved items so far.")
 
