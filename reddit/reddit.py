@@ -68,7 +68,7 @@ class RedditCollector(util.Collector):
 
         saved_posts = []
         saved_comments = []
-        for idx, item in enumerate(me.saved(limit=100)):
+        for idx, item in enumerate(me.saved(limit=None)):
             if isinstance(item, praw.models.Submission):
                 saved_posts.append(item)
             else:
